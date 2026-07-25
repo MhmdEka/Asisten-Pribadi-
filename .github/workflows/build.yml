@@ -19,7 +19,7 @@ jobs:
           cat > claudeApi.js << 'EOF'
           import AsyncStorage from '@react-native-async-storage/async-storage';
 
-          const API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+          const API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent';
 
           export async function getApiKey() {
             return AsyncStorage.getItem('gemini_api_key');
