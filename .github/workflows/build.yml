@@ -1,1 +1,43 @@
+name: Build APK
 
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unzip project
+        run: unzip asisten-pribadi.zip -d work
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        working-directory: work/asisten-pribadi
+        run: npm install
+
+      - name: Expo prebuild
+        working-directory: work/asisten-pribadi
+        run: npx expo prebuild --platform android
+
+      - name: Build debug APK
+        working-directory: work/asisten-pribadi/android
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: work/asisten-pribadi/android/app/build/outputs/apk/debug/*.apk
