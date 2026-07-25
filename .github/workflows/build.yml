@@ -13,6 +13,77 @@ jobs:
       - name: Unzip project
         run: unzip asisten-pribadi.zip -d work
 
+      - name: Replace claudeApi with Gemini
+        working-directory: work/asisten-pribadi/src/services
+        run: |
+          cat > claudeApi.js << 'EOF'
+          import AsyncStorage from '@react-native-async-storage/async-storage';
+
+          const API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+
+          export async function getApiKey() {
+            return AsyncStorage.getItem('gemini_api_key');
+          }
+
+          export async function setApiKey(key) {
+            return AsyncStorage.setItem('gemini_api_key', key);
+          }
+
+          export async function sendChatMessage(history, systemPrompt = '') {
+            const apiKey = await getApiKey();
+            if (!apiKey) {
+              throw new Error('API key belum diatur. Buka Settings untuk memasukkan Gemini API key Anda.');
+            }
+
+            const contents = history.map((m) => ({
+              role: m.role === 'assistant' ? 'model' : 'user',
+              parts: [{ text: m.content }],
+            }));
+
+            const body = { contents };
+            if (systemPrompt) {
+              body.system_instruction = { parts: [{ text: systemPrompt }] };
+            }
+
+            const response = await fetch(`${API_URL}?key=${apiKey}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+
+            if (!response.ok) {
+              const errText = await response.text();
+              throw new Error(`Gemini API error (${response.status}): ${errText}`);
+            }
+
+            const data = await response.json();
+            return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          }
+
+          export async function summarizeNotifications(notificationTexts) {
+            const joined = notificationTexts
+              .map((n) => `[${n.sender}] ${n.text}`)
+              .join('\n');
+
+            const systemPrompt =
+              'Kamu adalah asisten yang meringkas notifikasi WhatsApp menjadi poin-poin singkat dan jelas dalam Bahasa Indonesia. ' +
+              'Kelompokkan berdasarkan pengirim. Tandai pesan yang tampak penting/mendesak. Jangan menambahkan opini.';
+
+            return sendChatMessage(
+              [{ role: 'user', content: `Ringkas notifikasi berikut:\n\n${joined}` }],
+              systemPrompt
+            );
+          }
+          EOF
+
+      - name: Update Settings screen label
+        working-directory: work/asisten-pribadi/src/screens
+        run: |
+          sed -i "s/Anthropic API Key/Gemini API Key/g" SettingsScreen.js
+          sed -i "s/console.anthropic.com/aistudio.google.com\/apikey/g" SettingsScreen.js
+          sed -i "s/sk-ant-\.\.\./AIza.../g" SettingsScreen.js
+          sed -i "s/dikirim ke server manapun selain langsung ke Anthropic\./dikirim ke server manapun selain langsung ke Google./g" SettingsScreen.js
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
