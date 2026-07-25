@@ -29,8 +29,8 @@ jobs:
         run: |
           sed -i '/react-native-android-notification-listener/d' package.json
           npm install --legacy-peer-deps
-          npm install expo-image-picker@~15.0.7 expo-document-picker@~12.0.2 expo-file-system@~17.0.1 --legacy-peer-deps
-          
+          npm install expo-image-picker@~15.0.7 expo-document-picker@~12.0.2 expo-file-system@~17.0.1 expo-speech@~12.0.2 --legacy-peer-deps
+
       - name: Create placeholder assets
         working-directory: work/asisten-pribadi
         run: |
@@ -49,6 +49,7 @@ jobs:
           import AsyncStorage from '@react-native-async-storage/async-storage';
 
           const API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent';
+          const IMAGE_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent';
 
           export async function getApiKey() {
             return AsyncStorage.getItem('gemini_api_key');
@@ -64,7 +65,9 @@ jobs:
               throw new Error('API key belum diatur. Buka Settings untuk memasukkan Gemini API key Anda.');
             }
 
-            const defaultPrompt = 'Kamu adalah asisten pribadi yang ramah. Selalu jawab dalam Bahasa Indonesia, apapun bahasa yang dipakai user, kecuali user secara eksplisit minta bahasa lain.';
+            const defaultPrompt =
+              'Kamu adalah asisten pribadi yang ramah. Selalu jawab dalam Bahasa Indonesia, apapun bahasa yang dipakai user, kecuali user secara eksplisit minta bahasa lain. ' +
+              'Jika user mengirimkan tugas, soal, atau pekerjaan (baik berupa teks, foto, maupun dokumen), kerjakan tugas tersebut selengkap dan sejelas mungkin: berikan jawaban lengkap, langkah pengerjaan jika relevan, dan penjelasan yang mudah dipahami, bukan sekadar ringkasan singkat.';
             const finalPrompt = systemPrompt || defaultPrompt;
 
             const contents = history.map((m) => {
@@ -104,6 +107,49 @@ jobs:
             return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
           }
 
+          export async function editImage(base64, mimeType, instruction) {
+            const apiKey = await getApiKey();
+            if (!apiKey) {
+              throw new Error('API key belum diatur. Buka Settings untuk memasukkan Gemini API key Anda.');
+            }
+
+            const body = {
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    { inline_data: { mime_type: mimeType, data: base64 } },
+                    { text: instruction },
+                  ],
+                },
+              ],
+              generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+            };
+
+            const response = await fetch(`${IMAGE_API_URL}?key=${apiKey}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+
+            if (!response.ok) {
+              const errText = await response.text();
+              throw new Error(`Gemini Image API error (${response.status}): ${errText}`);
+            }
+
+            const data = await response.json();
+            const parts = data.candidates?.[0]?.content?.parts || [];
+            const imagePart = parts.find((p) => p.inline_data || p.inlineData);
+            const textPart = parts.find((p) => p.text);
+            const inline = imagePart?.inline_data || imagePart?.inlineData;
+
+            return {
+              text: textPart?.text || '',
+              base64: inline?.data || null,
+              mimeType: inline?.mime_type || inline?.mimeType || 'image/png',
+            };
+          }
+
           export async function summarizeNotifications(notificationTexts) {
             const joined = notificationTexts
               .map((n) => `[${n.sender}] ${n.text}`)
@@ -128,7 +174,7 @@ jobs:
           sed -i "s/sk-ant-\.\.\./AIza.../g" SettingsScreen.js
           sed -i "s/dikirim ke server manapun selain langsung ke Anthropic\./dikirim ke server manapun selain langsung ke Google./g" SettingsScreen.js
 
-      - name: Replace ChatScreen with attachment support
+      - name: Replace ChatScreen with attachment, image edit, and voice support
         working-directory: work/asisten-pribadi/src/screens
         run: |
           cat > ChatScreen.js << 'EOF'
@@ -149,7 +195,8 @@ jobs:
           import * as ImagePicker from 'expo-image-picker';
           import * as DocumentPicker from 'expo-document-picker';
           import * as FileSystem from 'expo-file-system';
-          import { sendChatMessage } from '../services/claudeApi';
+          import * as Speech from 'expo-speech';
+          import { sendChatMessage, editImage } from '../services/claudeApi';
 
           export default function ChatScreen() {
             const [messages, setMessages] = useState([]);
@@ -157,7 +204,24 @@ jobs:
             const [attachment, setAttachment] = useState(null);
             const [loading, setLoading] = useState(false);
             const [error, setError] = useState(null);
+            const [speakingIndex, setSpeakingIndex] = useState(null);
             const listRef = useRef(null);
+
+            const speak = (text, index) => {
+              if (speakingIndex === index) {
+                Speech.stop();
+                setSpeakingIndex(null);
+                return;
+              }
+              Speech.stop();
+              setSpeakingIndex(index);
+              Speech.speak(text, {
+                language: 'id-ID',
+                onDone: () => setSpeakingIndex(null),
+                onStopped: () => setSpeakingIndex(null),
+                onError: () => setSpeakingIndex(null),
+              });
+            };
 
             const pickFromGallery = async () => {
               const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -168,20 +232,15 @@ jobs:
                 quality: 0.6,
               });
               if (result.canceled) return;
-              const asset = result.assets[0];
-              await setAttachmentFromAsset(asset);
+              await setAttachmentFromAsset(result.assets[0]);
             };
 
             const pickFromCamera = async () => {
               const perm = await ImagePicker.requestCameraPermissionsAsync();
               if (!perm.granted) return;
-              const result = await ImagePicker.launchCameraAsync({
-                base64: true,
-                quality: 0.6,
-              });
+              const result = await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6 });
               if (result.canceled) return;
-              const asset = result.assets[0];
-              await setAttachmentFromAsset(asset);
+              await setAttachmentFromAsset(result.assets[0]);
             };
 
             const pickDocument = async () => {
@@ -250,42 +309,69 @@ jobs:
               }
             };
 
+            const handleEditImage = async () => {
+              if (!attachment || attachment.kind !== 'image') return;
+              const instruction = input.trim() || 'Edit foto ini agar lebih menarik';
+              const userMessage = { role: 'user', content: `✏️ Edit: ${instruction}`, attachment };
+              setMessages((prev) => [...prev, userMessage]);
+              setInput('');
+              const currentAttachment = attachment;
+              setAttachment(null);
+              setLoading(true);
+              setError(null);
+
+              try {
+                const result = await editImage(currentAttachment.base64, currentAttachment.mimeType, instruction);
+                if (result.base64) {
+                  setMessages((prev) => [
+                    ...prev,
+                    {
+                      role: 'assistant',
+                      content: result.text,
+                      attachment: {
+                        uri: `data:${result.mimeType};base64,${result.base64}`,
+                        kind: 'image',
+                      },
+                    },
+                  ]);
+                } else {
+                  setMessages((prev) => [...prev, { role: 'assistant', content: result.text || 'Tidak ada hasil.' }]);
+                }
+              } catch (e) {
+                setError(e.message);
+              } finally {
+                setLoading(false);
+                setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
+              }
+            };
+
             return (
-              <KeyboardAvoidingView
-                style={styles.container}
-                behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-              >
+              <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
                 <FlatList
                   ref={listRef}
                   data={messages}
                   keyExtractor={(_, idx) => idx.toString()}
                   contentContainerStyle={styles.list}
-                  renderItem={({ item }) => (
-                    <View
-                      style={[
-                        styles.bubble,
-                        item.role === 'user' ? styles.userBubble : styles.assistantBubble,
-                      ]}
-                    >
+                  renderItem={({ item, index }) => (
+                    <View style={[styles.bubble, item.role === 'user' ? styles.userBubble : styles.assistantBubble]}>
                       {item.attachment?.kind === 'image' && (
                         <Image source={{ uri: item.attachment.uri }} style={styles.thumbnail} />
                       )}
-                      {item.attachment?.kind === 'video' && (
-                        <Text style={styles.fileTag}>🎥 Video terlampir</Text>
-                      )}
-                      {item.attachment?.kind === 'file' && (
-                        <Text style={styles.fileTag}>📄 {item.attachment.name}</Text>
-                      )}
+                      {item.attachment?.kind === 'video' && <Text style={styles.fileTag}>🎥 Video terlampir</Text>}
+                      {item.attachment?.kind === 'file' && <Text style={styles.fileTag}>📄 {item.attachment.name}</Text>}
                       {!!item.content && (
-                        <Text style={item.role === 'user' ? styles.userText : styles.assistantText}>
-                          {item.content}
-                        </Text>
+                        <Text style={item.role === 'user' ? styles.userText : styles.assistantText}>{item.content}</Text>
+                      )}
+                      {item.role === 'assistant' && !!item.content && (
+                        <TouchableOpacity onPress={() => speak(item.content, index)} style={styles.speakButton}>
+                          <Text style={styles.speakButtonText}>
+                            {speakingIndex === index ? '⏹ Berhenti' : '🔊 Dengarkan'}
+                          </Text>
+                        </TouchableOpacity>
                       )}
                     </View>
                   )}
-                  ListEmptyComponent={
-                    <Text style={styles.emptyText}>Mulai percakapan dengan asisten Anda.</Text>
-                  }
+                  ListEmptyComponent={<Text style={styles.emptyText}>Mulai percakapan dengan asisten Anda.</Text>}
                 />
                 {error ? <Text style={styles.error}>{error}</Text> : null}
                 {loading ? <ActivityIndicator style={{ marginVertical: 8 }} /> : null}
@@ -298,6 +384,11 @@ jobs:
                       <Text style={styles.fileTag}>
                         {attachment.kind === 'video' ? '🎥 Video dipilih' : `📄 ${attachment.name}`}
                       </Text>
+                    )}
+                    {attachment.kind === 'image' && (
+                      <TouchableOpacity onPress={handleEditImage} style={styles.editButton}>
+                        <Text style={styles.editButtonText}>🎨 Edit dengan AI</Text>
+                      </TouchableOpacity>
                     )}
                     <TouchableOpacity onPress={() => setAttachment(null)}>
                       <Text style={styles.removeAttachment}>Hapus</Text>
@@ -322,7 +413,7 @@ jobs:
                     style={styles.input}
                     value={input}
                     onChangeText={setInput}
-                    placeholder="Tulis pesan..."
+                    placeholder={attachment?.kind === 'image' ? 'Instruksi edit foto (opsional)...' : 'Tulis pesan...'}
                     multiline
                   />
                   <TouchableOpacity style={styles.sendButton} onPress={handleSend}>
@@ -343,7 +434,7 @@ jobs:
             assistantText: { color: '#111827' },
             emptyText: { textAlign: 'center', color: '#9ca3af', marginTop: 40 },
             error: { color: '#dc2626', textAlign: 'center', marginBottom: 4 },
-            thumbnail: { width: 160, height: 160, borderRadius: 8, marginBottom: 6 },
+            thumbnail: { width: 200, height: 200, borderRadius: 8, marginBottom: 6 },
             fileTag: { fontStyle: 'italic', marginBottom: 4, color: '#374151' },
             attachmentPreview: {
               flexDirection: 'row',
@@ -351,40 +442,21 @@ jobs:
               paddingHorizontal: 12,
               paddingVertical: 6,
               backgroundColor: '#f1f5f9',
+              flexWrap: 'wrap',
             },
             previewThumb: { width: 50, height: 50, borderRadius: 6, marginRight: 10 },
-            removeAttachment: { color: '#dc2626', marginLeft: 10 },
-            actionRow: {
-              flexDirection: 'row',
-              paddingHorizontal: 8,
-              paddingTop: 6,
-              borderTopWidth: 1,
-              borderTopColor: '#e5e7eb',
-            },
+            editButton: { backgroundColor: '#7c3aed', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 6, marginRight: 10 },
+            editButtonText: { color: '#fff', fontSize: 12, fontWeight: '600' },
+            removeAttachment: { color: '#dc2626', marginLeft: 4 },
+            actionRow: { flexDirection: 'row', paddingHorizontal: 8, paddingTop: 6, borderTopWidth: 1, borderTopColor: '#e5e7eb' },
             iconButton: { padding: 8, marginRight: 4 },
             iconText: { fontSize: 22 },
-            inputRow: {
-              flexDirection: 'row',
-              padding: 8,
-              alignItems: 'flex-end',
-            },
-            input: {
-              flex: 1,
-              borderWidth: 1,
-              borderColor: '#d1d5db',
-              borderRadius: 20,
-              paddingHorizontal: 14,
-              paddingVertical: 8,
-              maxHeight: 100,
-            },
-            sendButton: {
-              marginLeft: 8,
-              backgroundColor: '#2563eb',
-              borderRadius: 20,
-              paddingHorizontal: 16,
-              paddingVertical: 10,
-            },
+            inputRow: { flexDirection: 'row', padding: 8, alignItems: 'flex-end' },
+            input: { flex: 1, borderWidth: 1, borderColor: '#d1d5db', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8, maxHeight: 100 },
+            sendButton: { marginLeft: 8, backgroundColor: '#2563eb', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10 },
             sendText: { color: '#fff', fontWeight: '600' },
+            speakButton: { marginTop: 6, alignSelf: 'flex-start' },
+            speakButtonText: { color: '#2563eb', fontSize: 12, fontWeight: '600' },
           });
           EOF
 
