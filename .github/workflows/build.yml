@@ -24,9 +24,11 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install dependencies
+       - name: Install dependencies
         working-directory: work/asisten-pribadi
-        run: npm install --legacy-peer-deps
+        run: |
+          sed -i '/react-native-android-notification-listener/d' package.json
+          npm install --legacy-peer-deps
 
       - name: Create placeholder assets
         working-directory: work/asisten-pribadi
