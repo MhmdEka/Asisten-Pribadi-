@@ -13,6 +13,35 @@ jobs:
       - name: Unzip project
         run: unzip asisten-pribadi.zip -d work
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        working-directory: work/asisten-pribadi
+        run: |
+          sed -i '/react-native-android-notification-listener/d' package.json
+          npm install --legacy-peer-deps
+          npm install expo-image-picker expo-document-picker expo-file-system --legacy-peer-deps
+
+      - name: Create placeholder assets
+        working-directory: work/asisten-pribadi
+        run: |
+          mkdir -p assets
+          curl -sSL -o assets/icon.png https://raw.githubusercontent.com/expo/expo/main/templates/expo-template-blank/assets/icon.png
+
+      - name: Add attachment permissions
+        working-directory: work/asisten-pribadi
+        run: |
+          sed -i 's/"plugins": \["expo-notifications"\]/"plugins": ["expo-notifications", ["expo-image-picker", { "photosPermission": "Aplikasi butuh akses galeri untuk melampirkan foto\/video.", "cameraPermission": "Aplikasi butuh akses kamera untuk mengambil foto." }]]/' app.json
+
       - name: Replace claudeApi with Gemini
         working-directory: work/asisten-pribadi/src/services
         run: |
@@ -38,10 +67,22 @@ jobs:
             const defaultPrompt = 'Kamu adalah asisten pribadi yang ramah. Selalu jawab dalam Bahasa Indonesia, apapun bahasa yang dipakai user, kecuali user secara eksplisit minta bahasa lain.';
             const finalPrompt = systemPrompt || defaultPrompt;
 
-            const contents = history.map((m) => ({
-              role: m.role === 'assistant' ? 'model' : 'user',
-              parts: [{ text: m.content }],
-            }));
+            const contents = history.map((m) => {
+              const parts = [];
+              if (m.content) parts.push({ text: m.content });
+              if (m.attachment?.base64) {
+                parts.push({
+                  inline_data: {
+                    mime_type: m.attachment.mimeType,
+                    data: m.attachment.base64,
+                  },
+                });
+              }
+              return {
+                role: m.role === 'assistant' ? 'model' : 'user',
+                parts,
+              };
+            });
 
             const body = {
               contents,
@@ -87,28 +128,265 @@ jobs:
           sed -i "s/sk-ant-\.\.\./AIza.../g" SettingsScreen.js
           sed -i "s/dikirim ke server manapun selain langsung ke Anthropic\./dikirim ke server manapun selain langsung ke Google./g" SettingsScreen.js
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Install dependencies
-        working-directory: work/asisten-pribadi
+      - name: Replace ChatScreen with attachment support
+        working-directory: work/asisten-pribadi/src/screens
         run: |
-          sed -i '/react-native-android-notification-listener/d' package.json
-          npm install --legacy-peer-deps
+          cat > ChatScreen.js << 'EOF'
+          import React, { useState, useRef } from 'react';
+          import {
+            View,
+            Text,
+            TextInput,
+            TouchableOpacity,
+            FlatList,
+            StyleSheet,
+            KeyboardAvoidingView,
+            Platform,
+            ActivityIndicator,
+            Image,
+            Alert,
+          } from 'react-native';
+          import * as ImagePicker from 'expo-image-picker';
+          import * as DocumentPicker from 'expo-document-picker';
+          import * as FileSystem from 'expo-file-system';
+          import { sendChatMessage } from '../services/claudeApi';
 
-      - name: Create placeholder assets
-        working-directory: work/asisten-pribadi
-        run: |
-          mkdir -p assets
-          curl -sSL -o assets/icon.png https://raw.githubusercontent.com/expo/expo/main/templates/expo-template-blank/assets/icon.png
+          export default function ChatScreen() {
+            const [messages, setMessages] = useState([]);
+            const [input, setInput] = useState('');
+            const [attachment, setAttachment] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState(null);
+            const listRef = useRef(null);
+
+            const pickFromGallery = async () => {
+              const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+              if (!perm.granted) return;
+              const result = await ImagePicker.launchImageLibraryAsync({
+                mediaTypes: ImagePicker.MediaTypeOptions.All,
+                base64: true,
+                quality: 0.6,
+              });
+              if (result.canceled) return;
+              const asset = result.assets[0];
+              await setAttachmentFromAsset(asset);
+            };
+
+            const pickFromCamera = async () => {
+              const perm = await ImagePicker.requestCameraPermissionsAsync();
+              if (!perm.granted) return;
+              const result = await ImagePicker.launchCameraAsync({
+                base64: true,
+                quality: 0.6,
+              });
+              if (result.canceled) return;
+              const asset = result.assets[0];
+              await setAttachmentFromAsset(asset);
+            };
+
+            const pickDocument = async () => {
+              const result = await DocumentPicker.getDocumentAsync({ type: '*/*' });
+              if (result.canceled) return;
+              const file = result.assets[0];
+              try {
+                const base64 = await FileSystem.readAsStringAsync(file.uri, {
+                  encoding: FileSystem.EncodingType.Base64,
+                });
+                setAttachment({
+                  uri: file.uri,
+                  base64,
+                  mimeType: file.mimeType || 'application/octet-stream',
+                  name: file.name,
+                  kind: 'file',
+                });
+              } catch (e) {
+                Alert.alert('Gagal membaca file', e.message);
+              }
+            };
+
+            const setAttachmentFromAsset = async (asset) => {
+              let base64 = asset.base64;
+              const isVideo = asset.type === 'video';
+              if (!base64) {
+                try {
+                  base64 = await FileSystem.readAsStringAsync(asset.uri, {
+                    encoding: FileSystem.EncodingType.Base64,
+                  });
+                } catch (e) {
+                  Alert.alert('Gagal membaca media', e.message);
+                  return;
+                }
+              }
+              setAttachment({
+                uri: asset.uri,
+                base64,
+                mimeType: isVideo ? 'video/mp4' : 'image/jpeg',
+                name: isVideo ? 'video.mp4' : 'foto.jpg',
+                kind: isVideo ? 'video' : 'image',
+              });
+            };
+
+            const handleSend = async () => {
+              const text = input.trim();
+              if (!text && !attachment) return;
+              if (loading) return;
+
+              const userMessage = { role: 'user', content: text, attachment };
+              const newHistory = [...messages, userMessage];
+              setMessages(newHistory);
+              setInput('');
+              setAttachment(null);
+              setLoading(true);
+              setError(null);
+
+              try {
+                const reply = await sendChatMessage(newHistory);
+                setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+              } catch (e) {
+                setError(e.message);
+              } finally {
+                setLoading(false);
+                setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
+              }
+            };
+
+            return (
+              <KeyboardAvoidingView
+                style={styles.container}
+                behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+              >
+                <FlatList
+                  ref={listRef}
+                  data={messages}
+                  keyExtractor={(_, idx) => idx.toString()}
+                  contentContainerStyle={styles.list}
+                  renderItem={({ item }) => (
+                    <View
+                      style={[
+                        styles.bubble,
+                        item.role === 'user' ? styles.userBubble : styles.assistantBubble,
+                      ]}
+                    >
+                      {item.attachment?.kind === 'image' && (
+                        <Image source={{ uri: item.attachment.uri }} style={styles.thumbnail} />
+                      )}
+                      {item.attachment?.kind === 'video' && (
+                        <Text style={styles.fileTag}>🎥 Video terlampir</Text>
+                      )}
+                      {item.attachment?.kind === 'file' && (
+                        <Text style={styles.fileTag}>📄 {item.attachment.name}</Text>
+                      )}
+                      {!!item.content && (
+                        <Text style={item.role === 'user' ? styles.userText : styles.assistantText}>
+                          {item.content}
+                        </Text>
+                      )}
+                    </View>
+                  )}
+                  ListEmptyComponent={
+                    <Text style={styles.emptyText}>Mulai percakapan dengan asisten Anda.</Text>
+                  }
+                />
+                {error ? <Text style={styles.error}>{error}</Text> : null}
+                {loading ? <ActivityIndicator style={{ marginVertical: 8 }} /> : null}
+
+                {attachment && (
+                  <View style={styles.attachmentPreview}>
+                    {attachment.kind === 'image' ? (
+                      <Image source={{ uri: attachment.uri }} style={styles.previewThumb} />
+                    ) : (
+                      <Text style={styles.fileTag}>
+                        {attachment.kind === 'video' ? '🎥 Video dipilih' : `📄 ${attachment.name}`}
+                      </Text>
+                    )}
+                    <TouchableOpacity onPress={() => setAttachment(null)}>
+                      <Text style={styles.removeAttachment}>Hapus</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+
+                <View style={styles.actionRow}>
+                  <TouchableOpacity style={styles.iconButton} onPress={pickFromGallery}>
+                    <Text style={styles.iconText}>🖼️</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.iconButton} onPress={pickFromCamera}>
+                    <Text style={styles.iconText}>📷</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.iconButton} onPress={pickDocument}>
+                    <Text style={styles.iconText}>📄</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.inputRow}>
+                  <TextInput
+                    style={styles.input}
+                    value={input}
+                    onChangeText={setInput}
+                    placeholder="Tulis pesan..."
+                    multiline
+                  />
+                  <TouchableOpacity style={styles.sendButton} onPress={handleSend}>
+                    <Text style={styles.sendText}>Kirim</Text>
+                  </TouchableOpacity>
+                </View>
+              </KeyboardAvoidingView>
+            );
+          }
+
+          const styles = StyleSheet.create({
+            container: { flex: 1, backgroundColor: '#fff' },
+            list: { padding: 12, flexGrow: 1 },
+            bubble: { borderRadius: 12, padding: 10, marginVertical: 4, maxWidth: '85%' },
+            userBubble: { backgroundColor: '#2563eb', alignSelf: 'flex-end' },
+            assistantBubble: { backgroundColor: '#f1f5f9', alignSelf: 'flex-start' },
+            userText: { color: '#fff' },
+            assistantText: { color: '#111827' },
+            emptyText: { textAlign: 'center', color: '#9ca3af', marginTop: 40 },
+            error: { color: '#dc2626', textAlign: 'center', marginBottom: 4 },
+            thumbnail: { width: 160, height: 160, borderRadius: 8, marginBottom: 6 },
+            fileTag: { fontStyle: 'italic', marginBottom: 4, color: '#374151' },
+            attachmentPreview: {
+              flexDirection: 'row',
+              alignItems: 'center',
+              paddingHorizontal: 12,
+              paddingVertical: 6,
+              backgroundColor: '#f1f5f9',
+            },
+            previewThumb: { width: 50, height: 50, borderRadius: 6, marginRight: 10 },
+            removeAttachment: { color: '#dc2626', marginLeft: 10 },
+            actionRow: {
+              flexDirection: 'row',
+              paddingHorizontal: 8,
+              paddingTop: 6,
+              borderTopWidth: 1,
+              borderTopColor: '#e5e7eb',
+            },
+            iconButton: { padding: 8, marginRight: 4 },
+            iconText: { fontSize: 22 },
+            inputRow: {
+              flexDirection: 'row',
+              padding: 8,
+              alignItems: 'flex-end',
+            },
+            input: {
+              flex: 1,
+              borderWidth: 1,
+              borderColor: '#d1d5db',
+              borderRadius: 20,
+              paddingHorizontal: 14,
+              paddingVertical: 8,
+              maxHeight: 100,
+            },
+            sendButton: {
+              marginLeft: 8,
+              backgroundColor: '#2563eb',
+              borderRadius: 20,
+              paddingHorizontal: 16,
+              paddingVertical: 10,
+            },
+            sendText: { color: '#fff', fontWeight: '600' },
+          });
+          EOF
 
       - name: Expo prebuild
         working-directory: work/asisten-pribadi
