@@ -35,15 +35,18 @@ jobs:
               throw new Error('API key belum diatur. Buka Settings untuk memasukkan Gemini API key Anda.');
             }
 
+            const defaultPrompt = 'Kamu adalah asisten pribadi yang ramah. Selalu jawab dalam Bahasa Indonesia, apapun bahasa yang dipakai user, kecuali user secara eksplisit minta bahasa lain.';
+            const finalPrompt = systemPrompt || defaultPrompt;
+
             const contents = history.map((m) => ({
               role: m.role === 'assistant' ? 'model' : 'user',
               parts: [{ text: m.content }],
             }));
 
-            const body = { contents };
-            if (systemPrompt) {
-              body.system_instruction = { parts: [{ text: systemPrompt }] };
-            }
+            const body = {
+              contents,
+              system_instruction: { parts: [{ text: finalPrompt }] },
+            };
 
             const response = await fetch(`${API_URL}?key=${apiKey}`, {
               method: 'POST',
