@@ -77,7 +77,7 @@ jobs:
           export async function openApp(appKey) {
             const packageName = APP_PACKAGES[appKey];
             if (!packageName) return false;
-            const intentUrl = `intent:#Intent;package=${packageName};launchFlags=0x10000000;end`;
+            const intentUrl = `intent:#Intent;action=android.intent.action.SET_ALARM;category=android.intent.category.DEFAULT;i.android.intent.extra.alarm.HOUR=${hour};i.android.intent.extra.alarm.MINUTES=${minute};S.android.intent.extra.alarm.MESSAGE=${encodeURIComponent(label)};end`;
             try {
               await Linking.openURL(intentUrl);
               return true;
