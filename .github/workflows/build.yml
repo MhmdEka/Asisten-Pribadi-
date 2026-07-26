@@ -123,7 +123,7 @@ jobs:
               if (key) return { type: 'open_app', app: key, label: APP_LABELS[key] };
             }
 
-            const alarmMatch = lower.match(/(?:buat|set|pasang)\s+alarm.*?(\d{1,2})[.:h](\d{2})?/);
+            const alarmMatch = lower.match(/(?:buat|set|pasang)\s+alarm.*?(\d{1,2})(?:[.:h](\d{2}))?/);
             if (alarmMatch) {
               const hour = parseInt(alarmMatch[1], 10);
               const minute = alarmMatch[2] ? parseInt(alarmMatch[2], 10) : 0;
