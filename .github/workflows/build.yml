@@ -215,12 +215,36 @@ jobs:
               }
               Speech.stop();
               setSpeakingIndex(index);
-              Speech.speak(text, {
-                language: 'id-ID',
-                onDone: () => setSpeakingIndex(null),
-                onStopped: () => setSpeakingIndex(null),
-                onError: () => setSpeakingIndex(null),
+
+              const chunks = text.match(/[^.!?\n]+[.!?\n]*/g) || [text];
+              const merged = [];
+              let current = '';
+              chunks.forEach((c) => {
+                if ((current + c).length > 350) {
+                  if (current) merged.push(current);
+                  current = c;
+                } else {
+                  current += c;
+                }
               });
+              if (current) merged.push(current);
+
+              let i = 0;
+              const speakNext = () => {
+                if (i >= merged.length) {
+                  setSpeakingIndex(null);
+                  return;
+                }
+                const part = merged[i];
+                i += 1;
+                Speech.speak(part, {
+                  language: 'id-ID',
+                  onDone: speakNext,
+                  onStopped: () => setSpeakingIndex(null),
+                  onError: () => setSpeakingIndex(null),
+                });
+              };
+              speakNext();
             };
 
             const pickFromGallery = async () => {
