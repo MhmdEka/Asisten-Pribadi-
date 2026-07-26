@@ -42,6 +42,98 @@ jobs:
         run: |
           sed -i 's/"plugins": \["expo-notifications"\]/"plugins": ["expo-notifications", ["expo-image-picker", { "photosPermission": "Aplikasi butuh akses galeri untuk melampirkan foto\/video.", "cameraPermission": "Aplikasi butuh akses kamera untuk mengambil foto." }]]/' app.json
 
+      - name: Create systemActions service
+        working-directory: work/asisten-pribadi/src/services
+        run: |
+          cat > systemActions.js << 'EOF'
+          import { Linking, Alert } from 'react-native';
+
+          const APP_PACKAGES = {
+            whatsapp: 'com.whatsapp',
+            tiktok: 'com.zhiliaoapp.musically',
+            instagram: 'com.instagram.android',
+            youtube: 'com.google.android.youtube',
+            gmail: 'com.google.android.gm',
+            chrome: 'com.android.chrome',
+            maps: 'com.google.android.apps.maps',
+            camera: 'com.android.camera',
+            gallery: 'com.google.android.apps.photos',
+            playstore: 'com.android.vending',
+          };
+
+          const APP_LABELS = {
+            whatsapp: 'WhatsApp',
+            tiktok: 'TikTok',
+            instagram: 'Instagram',
+            youtube: 'YouTube',
+            gmail: 'Gmail',
+            chrome: 'Chrome',
+            maps: 'Maps',
+            camera: 'Kamera',
+            gallery: 'Galeri',
+            playstore: 'Play Store',
+          };
+
+          export async function openApp(appKey) {
+            const packageName = APP_PACKAGES[appKey];
+            if (!packageName) return false;
+            const intentUrl = `intent:#Intent;package=${packageName};launchFlags=0x10000000;end`;
+            try {
+              await Linking.openURL(intentUrl);
+              return true;
+            } catch (e) {
+              try {
+                await Linking.openURL(`market://details?id=${packageName}`);
+              } catch (e2) {
+                Alert.alert('Gagal membuka aplikasi', `${APP_LABELS[appKey] || appKey} sepertinya belum terpasang.`);
+              }
+              return false;
+            }
+          }
+
+          export async function setAlarm(hour, minute, label = 'Alarm') {
+            const intentUrl = `intent:#Intent;action=android.intent.action.SET_ALARM;i.android.intent.extra.alarm.HOUR=${hour};i.android.intent.extra.alarm.MINUTES=${minute};S.android.intent.extra.alarm.MESSAGE=${encodeURIComponent(label)};end`;
+            try {
+              await Linking.openURL(intentUrl);
+              return true;
+            } catch (e) {
+              Alert.alert('Gagal membuat alarm', e.message);
+              return false;
+            }
+          }
+
+          export function detectCommand(text) {
+            const lower = text.toLowerCase();
+
+            const openMatch = lower.match(/buka\s+(whatsapp|wa|tiktok|instagram|ig|youtube|yt|gmail|chrome|maps|kamera|galeri|play\s?store)/);
+            if (openMatch) {
+              const map = {
+                whatsapp: 'whatsapp', wa: 'whatsapp',
+                tiktok: 'tiktok',
+                instagram: 'instagram', ig: 'instagram',
+                youtube: 'youtube', yt: 'youtube',
+                gmail: 'gmail',
+                chrome: 'chrome',
+                maps: 'maps',
+                kamera: 'camera',
+                galeri: 'gallery',
+                'play store': 'playstore', playstore: 'playstore',
+              };
+              const key = map[openMatch[1]];
+              if (key) return { type: 'open_app', app: key, label: APP_LABELS[key] };
+            }
+
+            const alarmMatch = lower.match(/(?:buat|set|pasang)\s+alarm.*?(\d{1,2})[.:h](\d{2})?/);
+            if (alarmMatch) {
+              const hour = parseInt(alarmMatch[1], 10);
+              const minute = alarmMatch[2] ? parseInt(alarmMatch[2], 10) : 0;
+              return { type: 'set_alarm', hour, minute };
+            }
+
+            return null;
+          }
+          EOF
+
       - name: Replace claudeApi with Gemini
         working-directory: work/asisten-pribadi/src/services
         run: |
@@ -66,7 +158,8 @@ jobs:
             }
 
             const defaultPrompt =
-              'Kamu adalah asisten pribadi yang ramah. Selalu jawab dalam Bahasa Indonesia, apapun bahasa yang dipakai user, kecuali user secara eksplisit minta bahasa lain. ' +
+              'Kamu adalah asisten pribadi yang ramah dan sopan. Selalu panggil user dengan sebutan "Tuan" (misal: "Baik, Tuan", "Tuan bisa coba...", dst), tanpa perlu diminta setiap kali. ' +
+              'Selalu jawab dalam Bahasa Indonesia, apapun bahasa yang dipakai user, kecuali user secara eksplisit minta bahasa lain. ' +
               'Jika user mengirimkan tugas, soal, atau pekerjaan (baik berupa teks, foto, maupun dokumen), kerjakan tugas tersebut selengkap dan sejelas mungkin: berikan jawaban lengkap, langkah pengerjaan jika relevan, dan penjelasan yang mudah dipahami, bukan sekadar ringkasan singkat.';
             const finalPrompt = systemPrompt || defaultPrompt;
 
@@ -174,7 +267,7 @@ jobs:
           sed -i "s/sk-ant-\.\.\./AIza.../g" SettingsScreen.js
           sed -i "s/dikirim ke server manapun selain langsung ke Anthropic\./dikirim ke server manapun selain langsung ke Google./g" SettingsScreen.js
 
-      - name: Replace ChatScreen with attachment, image edit, and voice support
+      - name: Replace ChatScreen with full features
         working-directory: work/asisten-pribadi/src/screens
         run: |
           cat > ChatScreen.js << 'EOF'
@@ -197,6 +290,7 @@ jobs:
           import * as FileSystem from 'expo-file-system';
           import * as Speech from 'expo-speech';
           import { sendChatMessage, editImage } from '../services/claudeApi';
+          import { detectCommand, openApp, setAlarm } from '../services/systemActions';
 
           export default function ChatScreen() {
             const [messages, setMessages] = useState([]);
@@ -314,6 +408,25 @@ jobs:
               if (!text && !attachment) return;
               if (loading) return;
 
+              if (text && !attachment) {
+                const command = detectCommand(text);
+                if (command) {
+                  setMessages((prev) => [...prev, { role: 'user', content: text }]);
+                  setInput('');
+                  let resultText = '';
+                  if (command.type === 'open_app') {
+                    await openApp(command.app);
+                    resultText = `Baik Tuan, membuka ${command.label}...`;
+                  } else if (command.type === 'set_alarm') {
+                    await setAlarm(command.hour, command.minute);
+                    resultText = `Baik Tuan, alarm jam ${String(command.hour).padStart(2, '0')}:${String(command.minute).padStart(2, '0')} sudah dibuat.`;
+                  }
+                  setMessages((prev) => [...prev, { role: 'assistant', content: resultText }]);
+                  setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
+                  return;
+                }
+              }
+
               const userMessage = { role: 'user', content: text, attachment };
               const newHistory = [...messages, userMessage];
               setMessages(newHistory);
@@ -395,7 +508,11 @@ jobs:
                       )}
                     </View>
                   )}
-                  ListEmptyComponent={<Text style={styles.emptyText}>Mulai percakapan dengan asisten Anda.</Text>}
+                  ListEmptyComponent={
+                    <Text style={styles.emptyText}>
+                      Mulai percakapan dengan asisten Anda. Coba juga ketik "buka whatsapp" atau "buat alarm jam 7".
+                    </Text>
+                  }
                 />
                 {error ? <Text style={styles.error}>{error}</Text> : null}
                 {loading ? <ActivityIndicator style={{ marginVertical: 8 }} /> : null}
@@ -456,7 +573,7 @@ jobs:
             assistantBubble: { backgroundColor: '#f1f5f9', alignSelf: 'flex-start' },
             userText: { color: '#fff' },
             assistantText: { color: '#111827' },
-            emptyText: { textAlign: 'center', color: '#9ca3af', marginTop: 40 },
+            emptyText: { textAlign: 'center', color: '#9ca3af', marginTop: 40, paddingHorizontal: 20 },
             error: { color: '#dc2626', textAlign: 'center', marginBottom: 4 },
             thumbnail: { width: 200, height: 200, borderRadius: 8, marginBottom: 6 },
             fileTag: { fontStyle: 'italic', marginBottom: 4, color: '#374151' },
@@ -487,6 +604,11 @@ jobs:
       - name: Expo prebuild
         working-directory: work/asisten-pribadi
         run: npx expo prebuild --platform android
+
+      - name: Add package visibility queries
+        working-directory: work/asisten-pribadi/android/app/src/main
+        run: |
+          sed -i 's#</manifest>#  <queries>\n    <package android:name="com.whatsapp"/>\n    <package android:name="com.zhiliaoapp.musically"/>\n    <package android:name="com.instagram.android"/>\n    <package android:name="com.google.android.youtube"/>\n    <package android:name="com.google.android.gm"/>\n    <package android:name="com.android.chrome"/>\n    <package android:name="com.google.android.apps.maps"/>\n    <package android:name="com.google.android.apps.photos"/>\n    <package android:name="com.android.vending"/>\n    <intent>\n      <action android:name="android.intent.action.SET_ALARM"/>\n    </intent>\n  </queries>\n</manifest>#' AndroidManifest.xml
 
       - name: Build release APK
         working-directory: work/asisten-pribadi/android
